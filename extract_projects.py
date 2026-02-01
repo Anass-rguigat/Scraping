@@ -3,7 +3,7 @@
 Extract investment projects from CRI sector PDFs.
 Uses only direct text extraction, deterministic regex rules, and simple calculations.
 No NLP, ML, or AI-based interpretation.
-Processes the Agro-Alimentaire PDF only; outputs output_projects.csv.
+Processes Agro-Alimentaire, Agriculture, Tourisme and Industrie PDFs (same logic for all); outputs output_projects.csv.
 """
 
 import csv
@@ -24,9 +24,14 @@ CURRENCY = "MAD"
 LANGUAGE = "FR"
 SOURCE_TYPE = "CRI"
 
-# PDF to process (Agro-Alimentaire only)
+# PDFs to process (same extraction logic for all)
 PDF_FILENAMES = [
     "Fiches-de-projet-Agro-Alimentaire-23052025.pdf",
+    "Fiches-de-projet-Agriculture-230225.pdf",
+    "Fiches-de-projet-tourisme-24032025.pdf",
+    "Fiches-de-projets-Industrie-230225.pdf",
+    "Fiches-de-projets-Artisanat-230225.pdf",
+    "Fiches-de-projets-Nouvelles-technologies-230225.pdf",
 ]
 
 # Investment range thresholds (MAD)
@@ -84,20 +89,21 @@ def _fix_missing_spaces_description(block: str) -> str:
 
 
 def _sector_from_filename(pdf_path: Path) -> str:
-    """Infer sector label from PDF filename when FILIÈRE not in text."""
-    name = pdf_path.stem.lower()
-    if "agro-alimentaire" in name or "agroalimentaire" in name:
-        return "AGROALIMENTAIRE"
-    if "agriculture" in name:
-        return "AGRICULTURE"
-    if "tourisme" in name:
-        return "TOURISME"
-    if "artisanat" in name:
-        return "ARTISANAT"
-    if "industrie" in name:
-        return "INDUSTRIE"
-    if "nouvelles-technologies" in name or "technologies" in name:
-        return "NOUVELLES TECHNOLOGIES"
+    """
+    Infer sector from PDF filename dynamically (no fixed sector list).
+    Expects pattern: Fiches-de-projet(s)-SECTOR-DATE.pdf → extracts SECTOR.
+    Example: Fiches-de-projet-tourisme-24032025.pdf → TOURISME.
+    Any new PDF following this pattern gets its sector from the filename.
+    Returns "CRI" only when the pattern does not match.
+    """
+    name = pdf_path.stem
+    # Match "projet-" or "projets-" then sector name until "-" + digits (date)
+    m = re.search(r"fiches-de-projets?-(.+?)-\d{5,8}$", name, re.IGNORECASE)
+    if m:
+        sector = m.group(1).strip()
+        if sector:
+            # Uppercase, hyphens → spaces (e.g. "Agro-Alimentaire" → "AGRO-ALIMENTAIRE" or "AGRO ALIMENTAIRE")
+            return sector.upper().replace("-", " ")
     return "CRI"
 
 
@@ -117,15 +123,15 @@ def extract_text_per_page(pdf_path: Path) -> list[tuple[int, str]]:
 def find_project_start_pages(pages_text: list[tuple[int, str]]) -> list[int]:
     """
     Detect pages where a new project starts.
-    Matches: PROJET N°36, PROJET N°A-001, PROJET N°T 001, or PROJET :
+    Matches: PROJET N°36, PROJET N°A-001, PROJET N°T 001, PROJET N° T °016 (Tourisme), or PROJET :
     Returns 1-based page numbers.
     """
     starts = []
     for page_num, text in pages_text:
         if page_num == 1:
             continue
-        # PROJET N°36, N°A-001, N°T 001, N°AR-001, N° NT-001
-        if re.search(r"PROJET\s+N[°\s]*[A-Za-z]*[\-\s]*\d+", text, re.IGNORECASE):
+        # PROJET N°36, N°A-001, N°T 001, N° T -002, N° T –016 (en-dash \u2013 in Tourisme PDF)
+        if re.search(r"PROJET\s+N[°\s]*[A-Za-z]*[\-\s°º\u2013\u2014]*\d+", text, re.IGNORECASE):
             starts.append(page_num)
     if starts:
         return sorted(starts)
@@ -138,6 +144,42 @@ def find_project_start_pages(pages_text: list[tuple[int, str]]) -> list[int]:
         ):
             starts.append(page_num)
     return sorted(set(starts))
+
+
+def _get_project_number_from_page(
+    pages_text: list[tuple[int, str]], page_num: int
+) -> str | None:
+    """Extract project number (e.g. 001, 002) from page text. Used to dedupe continuation pages."""
+    text_by_page = dict(pages_text)
+    text = text_by_page.get(page_num, "")
+    m = re.search(
+        r"PROJET\s+N[°\s]*[A-Za-z]*[\-\s°º\u2013\u2014]*(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    return m.group(1) if m else None
+
+
+def _dedupe_project_start_pages(
+    project_pages: list[int], pages_text: list[tuple[int, str]]
+) -> list[int]:
+    """
+    Remove continuation pages: when page p and p-1 are both in list and have the same
+    project number (e.g. Tourisme: page 4 and 5 both "T -002"), keep only p-1.
+    """
+    if len(project_pages) <= 1:
+        return project_pages
+    sorted_pages = sorted(project_pages)
+    kept = [sorted_pages[0]]
+    for p in sorted_pages[1:]:
+        prev = kept[-1]
+        if p == prev + 1:
+            num_p = _get_project_number_from_page(pages_text, p)
+            num_prev = _get_project_number_from_page(pages_text, prev)
+            if num_p is not None and num_prev is not None and num_p == num_prev:
+                continue  # same project, skip continuation page
+        kept.append(p)
+    return kept
 
 
 def get_project_text_block(pages_text: list[tuple[int, str]], start_page: int) -> str:
@@ -235,9 +277,9 @@ def _first_match_float(text: str, pattern: str, group: int = 1) -> float | None:
 
 
 def extract_project_title(text: str) -> str | None:
-    # "PROJET N°XX : TITLE" or "PROJET N° T-002 : TITLE" / "PROJET N°A-003 : TITLE" / "PROJET N° NT-001 : TITLE"
+    # "PROJET N°XX : TITLE" or "PROJET N° T-002 : TITLE" / "PROJET N° T –016 : TITLE" (en-dash in Tourisme)
     m = re.search(
-        r"PROJET\s+N[°\s]*[A-Za-z\-\s]*\d+\s*[:\-]?\s*(.+?)(?=FILIÈRE|FILIERE|Contact\s*:|$)",
+        r"PROJET\s+N[°\s]*[A-Za-z\-\s°º\u2013\u2014]*\d+\s*[:\-]?\s*(.+?)(?=FILIÈRE|FILIERE|Contact\s*:|$)",
         text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -259,9 +301,9 @@ def extract_project_title(text: str) -> str | None:
         t = re.sub(r"\s+Contact\s*:.*$", "", t, flags=re.IGNORECASE).strip()
         if t and len(t) > 2:
             return t
-    # Second fallback: "PROJET N° X-XXX TITLE" on second page (e.g. "PROJET N° T -002 STATION THERMALE À MOULAY YACOUB")
+    # Second fallback: "PROJET N° X-XXX TITLE" (e.g. "PROJET N° T –016 TITLE" with en-dash)
     m = re.search(
-        r"PROJET\s+N[°\s]*[A-Za-z\-\s]*\d+\s+([A-Za-zÀ-ÿ\s\-]+?)(?=MARCHÉ|MARCHE|$)",
+        r"PROJET\s+N[°\s]*[A-Za-z\-\s°º\u2013\u2014]*\d+\s+([A-Za-zÀ-ÿ\s\-]+?)(?=MARCHÉ|MARCHE|$)",
         text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -274,13 +316,36 @@ def extract_project_title(text: str) -> str | None:
 
 
 def extract_sector(text: str) -> str | None:
-    s = _first_match(text, r"FILIÈRE\s*[:\-]\s*([^\n]+)")
-    if s:
-        # Stop at Contact / Email / Tél (layout artifact)
-        for sep in ["Contact", "Email", "Tél"]:
-            if sep in s:
-                s = s.split(sep)[0].strip()
-        return s.strip() or None
+    # On capture tout entre FILIÈRE et le prochain champ (SOUS-FILIÈRE ou DESCRIPTION)
+    # Le DOTALL permet au '.' de prendre aussi les retours à la ligne (\n)
+    m = re.search(
+        r"FILI[ÈE]RE\s*[:\-]\s*(.+?)(?=SOUS-FILI[ÈE]RE|DESCRIPTION|INDICATEURS|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        block = m.group(1).strip()
+        # On découpe par ligne pour nettoyer les infos de contact qui polluent parfois le bloc
+        lines = block.split("\n")
+        kept = [
+            line.strip()
+            for line in lines
+            if line.strip()
+            and not re.match(r"^(Contact|Email|Tél)\s*:", line.strip(), re.IGNORECASE)
+        ]
+        # On rejoint tout avec un espace simple
+        s = " ".join(kept)
+        
+        # Nettoyage final des résidus de contact sur la même ligne
+        s = re.sub(r"\s+Email\s*:\s*\S+@\S+", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s+T[ée]l\s*:?\s*\+?[\d\s\-]+", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s+Contact\s*:.*", "", s, flags=re.IGNORECASE)
+        
+        # Correction spécifique pour le PDF Nouvelles Technologies
+        s = re.sub(r"tourismeet", "TOURISME ET", s, flags=re.IGNORECASE)
+        
+        s = re.sub(r"\s+", " ", s).strip()
+        return s if s else None
     return None
 
 
@@ -563,9 +628,9 @@ def build_record(
     publication_date: str | None,
 ) -> dict:
     title = extract_project_title(text)
-    sector = extract_sector(text)
-    if not sector:
-        sector = _sector_from_filename(pdf_path)
+    # Sector: based on FILIÈRE in PDF (e.g. "FILIÈRE : Tourisme" → TOURISME). Fallback to filename only when FILIÈRE is missing.
+    sector_raw = extract_sector(text) or (_sector_from_filename(pdf_path) if pdf_path else None) or "CRI"
+    sector = (sector_raw or "CRI").strip().upper()
     region = extract_region(text)
     if not region and "fesmeknes" in str(pdf_path).lower():
         region = "Fès-Meknès"
@@ -582,8 +647,8 @@ def build_record(
     _title_norm = normalize_for_reference(title or "PROJET")
     project_reference = f"{_region_norm}-{_title_norm}-{project_index}"
 
-    # project_bank_category: high-level from FILIÈRE or filename, uppercase
-    project_bank_category = (sector or _sector_from_filename(pdf_path)).upper().strip()
+    # project_bank_category: same as sector (already uppercase from FILIÈRE or filename)
+    project_bank_category = sector
 
     return {
         "project_id": project_id,
@@ -631,6 +696,7 @@ def main() -> None:
         pages_text = extract_text_per_page(pdf_path)
         project_pages = find_project_start_pages(pages_text)
         project_pages = [p for p in project_pages if p > 1]
+        project_pages = _dedupe_project_start_pages(project_pages, pages_text)
 
         publication_date = extract_publication_date(pages_text, pdf_path)
 
@@ -676,15 +742,31 @@ def main() -> None:
     ]
     df = df[[c for c in column_order if c in df.columns]]
 
-    df.to_csv(
-        OUTPUT_CSV,
-        index=False,
-        encoding="utf-8-sig",
-        sep=",",
-        na_rep="NULL",
-        quoting=csv.QUOTE_NONNUMERIC,
-    )
-    print(f"Extracted {len(df)} projects total to {OUTPUT_CSV}")
+    try:
+        df.to_csv(
+            OUTPUT_CSV,
+            index=False,
+            encoding="utf-8-sig",
+            sep=",",
+            na_rep="NULL",
+            quoting=csv.QUOTE_NONNUMERIC,
+        )
+        print(f"Extracted {len(df)} projects total to {OUTPUT_CSV}")
+    except OSError as e:
+        if e.errno == 13:  # Permission denied
+            fallback_csv = SCRIPT_DIR / "output_projects_new.csv"
+            df.to_csv(
+                fallback_csv,
+                index=False,
+                encoding="utf-8-sig",
+                sep=",",
+                na_rep="NULL",
+                quoting=csv.QUOTE_NONNUMERIC,
+            )
+            print(f"Extracted {len(df)} projects total to {fallback_csv}")
+            print("(output_projects.csv is open elsewhere — close it, then rename output_projects_new.csv if needed.)")
+        else:
+            raise
 
 
 if __name__ == "__main__":
