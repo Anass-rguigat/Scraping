@@ -325,22 +325,21 @@ def extract_sector(text: str) -> str | None:
     )
     if m:
         block = m.group(1).strip()
-        # On découpe par ligne pour nettoyer les infos de contact qui polluent parfois le bloc
         lines = block.split("\n")
-        kept = [
-            line.strip()
-            for line in lines
-            if line.strip()
-            and not re.match(r"^(Contact|Email|Tél)\s*:", line.strip(), re.IGNORECASE)
-        ]
-        # On rejoint tout avec un espace simple
-        s = " ".join(kept)
         
-        # Nettoyage final des résidus de contact sur la même ligne
-        s = re.sub(r"\s+Email\s*:\s*\S+@\S+", "", s, flags=re.IGNORECASE)
-        s = re.sub(r"\s+T[ée]l\s*:?\s*\+?[\d\s\-]+", "", s, flags=re.IGNORECASE)
-        s = re.sub(r"\s+Contact\s*:.*", "", s, flags=re.IGNORECASE)
-        
+        # New logic: clean each line individually before joining
+        cleaned_lines = []
+        for line in lines:
+            # Remove Contact/Email/Tel if they appear on the line
+            # We use substitute to remove only the contact part + rest of line
+            # This prevents killing the *next* line if we were doing a full block regex
+            line = re.sub(r"(?:Contact|Email|T[ée]l)\s*:.*$", "", line, flags=re.IGNORECASE)
+            line = line.strip()
+            if line:
+                cleaned_lines.append(line)
+
+        s = " ".join(cleaned_lines)
+
         # Correction spécifique pour le PDF Nouvelles Technologies
         s = re.sub(r"tourismeet", "TOURISME ET", s, flags=re.IGNORECASE)
         
