@@ -26,12 +26,12 @@ SOURCE_TYPE = "CRI"
 
 # PDFs to process (same extraction logic for all)
 PDF_FILENAMES = [
-    "Fiches-de-projet-Agro-Alimentaire-23052025.pdf",
-    "Fiches-de-projet-Agriculture-230225.pdf",
-    "Fiches-de-projet-tourisme-24032025.pdf",
-    "Fiches-de-projets-Industrie-230225.pdf",
-    "Fiches-de-projets-Artisanat-230225.pdf",
-    "Fiches-de-projets-Nouvelles-technologies-230225.pdf",
+    "fes-mekness/Fiches-de-projet-Agro-Alimentaire-23052025.pdf",
+    "fes-mekness/Fiches-de-projet-Agriculture-230225.pdf",
+    "fes-mekness/Fiches-de-projet-tourisme-24032025.pdf",
+    "fes-mekness/Fiches-de-projets-Industrie-230225.pdf",
+    "fes-mekness/Fiches-de-projets-Artisanat-230225.pdf",
+    "fes-mekness/Fiches-de-projets-Nouvelles-technologies-230225.pdf",
 ]
 
 # Investment range thresholds (MAD)
